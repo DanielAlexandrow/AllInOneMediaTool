@@ -321,8 +321,9 @@ body::before{
 .brand-text strong{font-size:15px;letter-spacing:-.02em;font-weight:700}
 .brand-text span{font-size:10px;letter-spacing:.18em;color:rgba(214,224,245,.62)}
 .nav{gap:4px}
-.nav button{border-radius:18px;padding:10px 12px;color:var(--muted);font-weight:600;letter-spacing:-.01em;border:1px solid transparent;background:transparent;box-shadow:none;transition:background .22s cubic-bezier(.2,.8,.2,1),border-color .22s,color .22s,transform .22s}
-.nav button:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav button{border-radius:18px;padding:10px 12px;color:var(--muted);font-weight:600;letter-spacing:-.01em;border:1px solid transparent;background:transparent;box-shadow:none;transition:transform .22s}
+.nav button:not(.active){background:transparent}
+.nav button:hover:not(.active){background:rgba(255,255,255,.06);color:#fff}
 .nav button.active{background:linear-gradient(145deg,rgba(255,255,255,.2),rgba(255,255,255,.06));border-color:rgba(255,255,255,.22);box-shadow:0 12px 28px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.35);color:#fff}
 .nav-ic{width:23px;height:23px;background:transparent;border:0;border-radius:0;padding:0;display:grid;place-items:center;color:currentColor;font-size:0}
 .nav-ic svg{width:19px;height:19px;display:block}
@@ -504,6 +505,13 @@ label.check:has(input:checked)::after{transform:translate(16px,-50%)}
 label.check:active::after{width:24px}
 label.check:has(input:checked):active::after{transform:translate(14px,-50%)}
 label.check:focus-within::before{box-shadow:0 0 0 4px rgba(10,132,255,.2),inset 0 1px 2px rgba(0,0,0,.3)}
+.view{animation:none!important}
+html{-webkit-tap-highlight-color:transparent}
+.nav button:focus:not(:focus-visible):not(.active){background:transparent;color:var(--muted)}
+.settings-grid{min-width:0}
+.settings-grid>*{min-width:0}
+.card{min-width:0}
+.code,.log{max-width:100%;min-width:0}
 </style>
 </head>
 <body>
@@ -2962,7 +2970,7 @@ function go(view) {
   if (view === 'settings') updateStorage();
   if (view === 'library') renderLibrary();
   if (view === 'history') renderHistory();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo({ top: 0, behavior: isMobileDevice() ? 'auto' : 'smooth' });
 }
 
 /* --------------------------------- events ---------------------------------- */
