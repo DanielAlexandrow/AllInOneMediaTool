@@ -405,7 +405,9 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border:0;border-radiu
 .lib-body h3{letter-spacing:-.015em}
 .lib-meta{color:rgba(196,208,229,.65)}
 .empty{background:linear-gradient(160deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px dashed rgba(255,255,255,.16);border-radius:28px;-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px)}
-.empty-mark{background:linear-gradient(145deg,rgba(255,255,255,.24),rgba(10,132,255,.4));border-color:rgba(255,255,255,.24);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 14px 34px rgba(10,132,255,.2);color:#fff}
+.empty-mark{width:64px;height:64px;border-radius:20px;background:linear-gradient(145deg,rgba(255,255,255,.24),rgba(10,132,255,.4));border-color:rgba(255,255,255,.24);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 14px 34px rgba(10,132,255,.2);color:#fff}
+.empty-mark svg{width:28px;height:28px;display:block}
+.download-grid,.settings-grid{align-items:start}
 .preview-card{background:linear-gradient(155deg,rgba(26,34,54,.5),rgba(12,17,28,.4))}
 .preview-mount{border-color:rgba(255,255,255,.12);border-radius:18px;box-shadow:inset 0 1px 0 rgba(255,255,255,.1)}
 .audio-art .wave{opacity:.7}
@@ -588,7 +590,7 @@ html{-webkit-tap-highlight-color:transparent}
         </select>
       </div>
       <div id="libEmpty" class="empty">
-        <div class="empty-mark">AIO</div>
+        <div class="empty-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="3.5"/><path d="M3.8 15.2l4.6-4.1 4 3.4 3.1-2.6 4.7 4.4"/><circle cx="8.6" cy="9.4" r="1.2"/></svg></div>
         <h3>Your library is empty</h3>
         <p>Import a video, audio file, or image, or download a YouTube video from the Download tab.</p>
         <button class="btn primary" data-action="import">Import media</button>
@@ -602,7 +604,7 @@ html{-webkit-tap-highlight-color:transparent}
         <button class="btn ghost" data-view="library">Back to library</button>
       </div>
       <div id="studioEmpty" class="empty">
-        <div class="empty-mark">STD</div>
+        <div class="empty-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.2" cy="6.2" r="2.4"/><circle cx="6.2" cy="17.8" r="2.4"/><path d="M8.2 7.7L19.5 17M8.2 16.3L19.5 7"/></svg></div>
         <h3>Nothing selected</h3>
         <p>Pick a file in the Library to trim, compress, or convert it. Downloads land in the Library automatically.</p>
         <button class="btn primary" data-action="import">Import media</button>
@@ -699,7 +701,7 @@ html{-webkit-tap-highlight-color:transparent}
         </div>
       </div>
       <div id="historyEmpty" class="empty">
-        <div class="empty-mark">HIS</div>
+        <div class="empty-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.8 12a8.2 8.2 0 1 0 2.5-5.9"/><path d="M3.8 4.8v5h5"/><path d="M12 8v4.4l3 1.8"/></svg></div>
         <h3>No activity yet</h3>
         <p>Export a trimmed or compressed file from the Studio, or download something. Progress is shown here.</p>
       </div>
@@ -3262,6 +3264,7 @@ document.addEventListener('DOMContentLoaded', init);
 </script>
 </body>
 </html>
+
 
 
 
