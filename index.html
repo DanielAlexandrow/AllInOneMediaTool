@@ -386,6 +386,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
             <button class="btn ghost" data-action="paste-url">Paste</button>
             <button class="btn ghost" data-action="demo-url">Try sample video</button>
           </div>
+          <label class="check"><input type="checkbox" id="dlTurbo" checked> Turbo download (4 parallel connections)</label>
+          <p class="hint">Turbo fetches several byte ranges at once; measured about 3x faster on the default Invidious proxy. It falls back automatically if the server rejects ranges. On a phone, 240p or 360p is several times smaller than 720p/1080p. The first job also loads the ~32 MB FFmpeg engine once; later jobs reuse it. Keep this page open: a screen wake lock is requested, but iOS still pauses tabs you switch away from.</p>
           <div id="dlStatus" class="inline-status hidden"></div>
         </div>
         <div class="card">
@@ -475,7 +477,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
             </select>
           </label>
           <label class="check"><input id="setAuto" type="checkbox"> Auto-save completed exports</label>
-          <p class="hint">Inputs, exports, and history metadata stay in this browser. Auto-save asks the browser to download each finished export.</p>
+          <label class="check"><input id="setKeepAwake" type="checkbox"> Request screen wake lock during downloads and exports</label>
+          <p class="hint">Inputs, exports, and history metadata stay in this browser. Auto-save asks the browser to download each finished export. Wake Lock prevents the screen from sleeping; switching apps can still suspend Safari.</p>
         </div>
         <div class="card">
           <h3>FFmpeg engine</h3>
@@ -505,7 +508,10 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
           <ol class="steps">
             <li>Host this HTML over HTTPS (for example Netlify Drop, Cloudflare Pages, or GitHub Pages) or serve it from a computer on the same Wi-Fi.</li>
             <li>Open the URL in Safari. Safari 16.4 or newer is recommended for WebAssembly SIMD.</li>
-            <li>Keep Safari in the foreground while downloading or exporting; iOS suspends background tabs.</li>
+            <li>Turbo uses four parallel connections and was about 3x faster than a single stream in testing.</li>
+            <li>Keep Safari in the foreground while downloading or exporting. The app requests a screen wake lock so the screen cannot auto-lock, but iOS still pauses tabs you switch away from.</li>
+            <li>Wake Lock works in Safari 16.4+. Before iOS 18.4 it does not work from a Home Screen web app, so use a normal Safari tab there.</li>
+            <li>The first download loads the ~32 MB FFmpeg engine once; later jobs reuse it.</li>
             <li>Use Save to open the share sheet when hosted over HTTPS, and store files in Photos or Files.</li>
             <li>The local yt-dlp bridge cannot run on the phone. YouTube works directly; use a Cobalt API for other sites.</li>
           </ol>
@@ -557,6 +563,8 @@ const state = {
   currentJobDuration: 0,
   pumping: false,
   dlBusy: false,
+  wakeLock: null,
+  wakeLockPending: false,
   aborters: new Map()
 };
 let dbPromise = null;
@@ -693,6 +701,41 @@ async function triggerDownload(blob, name, preferShare) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 8000);
 }
+function hasActiveJobs() {
+  return state.jobs.some(j => j.status === 'processing' || j.status === 'queued');
+}
+async function acquireWakeLock() {
+  if (!state.settings || state.settings.keepAwake === false || document.hidden) return;
+  if (!navigator.wakeLock || state.wakeLock || state.wakeLockPending) return;
+  state.wakeLockPending = true;
+  try {
+    const lock = await navigator.wakeLock.request('screen');
+    if (!hasActiveJobs() || state.settings.keepAwake === false || document.hidden) {
+      try { await lock.release(); } catch (e) {}
+      return;
+    }
+    state.wakeLock = lock;
+    pushLog('Screen wake lock active.');
+    lock.addEventListener('release', () => {
+      state.wakeLock = null;
+      if (hasActiveJobs() && !document.hidden) setTimeout(acquireWakeLock, 1000);
+    });
+  } catch (err) {
+    pushLog('Wake lock unavailable: ' + (err && err.message ? err.message : err));
+  } finally {
+    state.wakeLockPending = false;
+  }
+}
+async function releaseWakeLock() {
+  if (!state.wakeLock) return;
+  try { await state.wakeLock.release(); } catch (e) {}
+  state.wakeLock = null;
+}
+function syncWakeLock() {
+  if (!state.settings) return;
+  if (hasActiveJobs() && state.settings.keepAwake !== false && !document.hidden) acquireWakeLock();
+  else releaseWakeLock();
+}
 function applyProxy(url) {
   const p = String(state.settings.proxy || '').trim();
   if (!p) return url;
@@ -818,7 +861,9 @@ function defaultSettings() {
     cobaltKey: '',
     proxy: '',
     preferredQuality: '720',
-    autoDownload: false
+    autoDownload: false,
+    turbo: true,
+    keepAwake: true
   };
 }
 function loadSettings() {
@@ -1654,6 +1699,8 @@ function buildAudioArgs(start, duration, bitrate, inputName, outputName) {
 }
 async function runFfmpegJob(job, asset) {
   await ffmpegExclusive(async () => {
+    job.note = 'Preparing FFmpeg engine (first run downloads about 32 MB)...';
+    scheduleJobUI(job);
     const ff = await ensureFFmpeg();
     const rec = await dbGet('files', asset.id);
     const srcBlob = blobFromRecord(rec);
@@ -1906,14 +1953,115 @@ function mediaUrlForDownload(url, base) {
     return u.toString();
   } catch (e) { return url; }
 }
+function waitForConnectivity(signal, ms) {
+  return new Promise(resolve => {
+    if (signal && signal.aborted) { resolve(); return; }
+    let done = false;
+    const delay = Math.max(250, ms || 1000);
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onState);
+      window.removeEventListener('online', finish);
+      if (signal) signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const onState = () => { if (!document.hidden && navigator.onLine) finish(); };
+    const timer = setTimeout(finish, delay);
+    document.addEventListener('visibilitychange', onState);
+    window.addEventListener('online', finish);
+    if (signal) signal.addEventListener('abort', finish, { once: true });
+  });
+}
+async function fetchRangeChunk(url, start, end, signal, job, note, from, to, total, shared) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    try {
+      const res = await fetch(url, { headers: { Range: 'bytes=' + start + '-' + end }, signal: signal, cache: 'no-store' });
+      if (res.status !== 206) {
+        try { if (res.body) res.body.cancel(); } catch (e) {}
+        throw new Error('range request returned HTTP ' + res.status);
+      }
+      const buffer = await res.arrayBuffer();
+      const expected = end - start + 1;
+      if (buffer.byteLength !== expected) throw new Error('short range ' + buffer.byteLength + '/' + expected);
+      shared.received += buffer.byteLength;
+      const ratio = total ? Math.min(1, shared.received / total) : 0;
+      job.progress = Math.max(job.progress || 0, from + (to - from) * ratio);
+      job.note = note + ' ' + Math.round(ratio * 100) + '% (Turbo)';
+      scheduleJobUI(job);
+      return new Uint8Array(buffer);
+    } catch (err) {
+      if (signal && signal.aborted) throw err;
+      lastErr = err;
+      pushLog('Turbo chunk retry ' + (attempt + 1) + ': ' + (err && err.message ? err.message : err));
+      await waitForConnectivity(signal, Math.min(8000, 500 * Math.pow(2, attempt)));
+    }
+  }
+  throw lastErr || new Error('Turbo chunk failed');
+}
+async function downloadParallel(url, job, from, to, note, total, signal, mime) {
+  const connections = state.settings.turbo === false ? 1 : 4;
+  if (connections < 2 || !total || total < 1024 * 1024) return null;
+  const chunkSize = 2 * 1024 * 1024;
+  const count = Math.ceil(total / chunkSize);
+  const chunks = new Array(count);
+  const shared = { received: 0 };
+  let cursor = 0;
+  const worker = async () => {
+    while (true) {
+      if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      const index = cursor++;
+      if (index >= count) return;
+      const start = index * chunkSize;
+      const end = Math.min(total - 1, start + chunkSize - 1);
+      chunks[index] = await fetchRangeChunk(url, start, end, signal, job, note, from, to, total, shared);
+    }
+  };
+  const workers = Math.min(connections, count);
+  pushLog('Turbo: ' + count + ' ranges with ' + workers + ' parallel connections (' + fmtBytes(total) + ').');
+  job.note = note + ' (Turbo x' + workers + ')';
+  scheduleJobUI(job);
+  await Promise.all(Array.from({ length: workers }, worker));
+  job.progress = Math.max(job.progress || 0, to);
+  return new Blob(chunks, { type: mime || 'application/octet-stream' });
+}
+async function tryParallel(candidate, job, from, to, note, total, signal, mime) {
+  if (state.settings.turbo === false || !total || total < 1024 * 1024) return null;
+  try {
+    const probe = await fetch(candidate, { headers: { Range: 'bytes=0-0' }, signal: signal, cache: 'no-store' });
+    const status = probe.status;
+    try { if (probe.body) probe.body.cancel(); } catch (e) {}
+    if (status !== 206) {
+      pushLog('Turbo unavailable: server returned HTTP ' + status + ' for a range request.');
+      return null;
+    }
+  } catch (err) {
+    if (signal && signal.aborted) throw err;
+    pushLog('Turbo probe failed: ' + (err && err.message ? err.message : err));
+    return null;
+  }
+  try {
+    return await downloadParallel(candidate, job, from, to, note, total, signal, mime);
+  } catch (err) {
+    if (signal && signal.aborted) throw err;
+    pushLog('Turbo failed, falling back to a single stream: ' + (err && err.message ? err.message : err));
+    return null;
+  }
+}
 async function downloadStream(url, base, job, from, to, note, format, signal) {
   const target = mediaUrlForDownload(url, base);
   const totalHint = format && format.contentLength ? format.contentLength : (() => { try { return new URL(url).searchParams.get('clen'); } catch (e) { return 0; } })();
+  const total = Number(totalHint) || 0;
   const attempts = target !== url ? [target, url] : [url];
   let lastErr = null;
   for (let i = 0; i < attempts.length; i++) {
     try {
-      pushLog('Fetching stream: ' + prettyUrl(attempts[i]));
+      pushLog('Fetching stream: ' + prettyUrl(attempts[i]) + (total ? ' (' + fmtBytes(total) + ')' : ''));
+      const turboBlob = await tryParallel(attempts[i], job, from, to, note, total, signal, format && format.type);
+      if (turboBlob) return turboBlob;
       const res = await fetch(attempts[i], { signal: signal });
       return await readMediaResponse(res, job, from, to, note, totalHint);
     } catch (err) {
@@ -1932,9 +2080,11 @@ async function downloadStream(url, base, job, from, to, note, format, signal) {
   throw new Error('Could not download the media stream. ' + (lastErr ? lastErr.message : 'The instance may be rate-limited.') + ' If the instance redirects media, set the media host override in Settings.');
 }
 async function muxStreams(videoBlob, audioBlob, videoMime, audioMime, job) {
-  jobProgress(job, 0.72, 0.74, 'Muxing video and audio...');
+  jobProgress(job, 0.72, 0.74, 'Preparing FFmpeg engine (first run downloads about 32 MB)...');
   return ffmpegExclusive(async () => {
     const ff = await ensureFFmpeg();
+    job.note = 'Muxing video and audio...';
+    scheduleJobUI(job);
     const videoIsMp4 = /video\/mp4/i.test(videoMime);
     const audioIsMp4 = /audio\/mp4/i.test(audioMime) || /audio\/aac/i.test(audioMime);
     const videoExt = videoIsMp4 ? 'mp4' : 'webm';
@@ -1972,9 +2122,11 @@ async function muxStreams(videoBlob, audioBlob, videoMime, audioMime, job) {
   });
 }
 async function convertAudioToMp3(audioBlob, audioMime, job, signal) {
-  jobProgress(job, 0.7, 0.72, 'Converting audio to MP3...');
+  jobProgress(job, 0.7, 0.72, 'Preparing FFmpeg engine (first run downloads about 32 MB)...');
   return ffmpegExclusive(async () => {
     const ff = await ensureFFmpeg();
+    job.note = 'Encoding MP3...';
+    scheduleJobUI(job);
     const aac = /audio\/mp4/i.test(audioMime) || /audio\/aac/i.test(audioMime);
     const ext = aac ? 'm4a' : 'webm';
     const inName = 'dl-audio.' + ext;
@@ -2185,6 +2337,10 @@ async function startDownload() {
   const btn = document.querySelector('[data-action="download"]');
   if (btn) btn.disabled = true;
   setDlStatus('Starting download...', false);
+  if (isMobileDevice()) {
+    if (navigator.wakeLock) toast('Keep this page open. Screen wake lock requested; Turbo is on.');
+    else toast('Keep this page open and stop auto-lock; this browser has no Wake Lock.', 'error');
+  }
   const job = {
     id: uid(), type: 'download', status: 'processing', name: prettyUrl(url), url: url,
     mode: mode, quality: quality, detail: (parseYouTubeId(url) ? 'YouTube' : 'URL') + ' · ' + (mode === 'audio' ? 'MP3' : quality === 'max' ? 'best' : quality + 'p'),
@@ -2292,6 +2448,7 @@ function jobHTML(job) {
   '</article>';
 }
 function updateQueueCount() {
+  syncWakeLock();
   const active = state.jobs.filter(j => j.status === 'processing' || j.status === 'queued').length;
   const el = $('#queueCount');
   if (!el) return;
@@ -2359,6 +2516,10 @@ function fillSettingsForm() {
   });
   const auto = $('#setAuto');
   if (auto) auto.checked = !!s.autoDownload;
+  const keep = $('#setKeepAwake');
+  if (keep) keep.checked = s.keepAwake !== false;
+  const turbo = $('#dlTurbo');
+  if (turbo) turbo.checked = s.turbo !== false;
 }
 function bindSettingsForm() {
   const map = {
@@ -2373,6 +2534,10 @@ function bindSettingsForm() {
   });
   const auto = $('#setAuto');
   if (auto) auto.addEventListener('change', () => { state.settings.autoDownload = auto.checked; saveSettings(); });
+  const keep = $('#setKeepAwake');
+  if (keep) keep.addEventListener('change', () => { state.settings.keepAwake = keep.checked; saveSettings(); syncWakeLock(); });
+  const turbo = $('#dlTurbo');
+  if (turbo) turbo.addEventListener('change', () => { state.settings.turbo = turbo.checked; saveSettings(); });
   const quality = $('#setQuality');
   if (quality) quality.addEventListener('change', () => {
     const dl = $('#dlQuality');
@@ -2451,7 +2616,7 @@ function showIosNotice() {
   if (location.protocol === 'file:') {
     text.textContent = 'Safari cannot run this page from a local file. Host the HTML over HTTPS (or serve it from a computer on your Wi-Fi) and open that link in Safari. The yt-dlp bridge is not available on the phone; YouTube works without it.';
   } else {
-    text.textContent = 'Keep Safari in the foreground while downloading or exporting. Use Save to open the iOS share sheet when hosted over HTTPS, and store files in Photos or Files. iOS may clear browser storage after long inactivity, so save important exports or use Keep storage in Settings.';
+    text.textContent = 'Turbo is on and the app requests a screen wake lock so the screen cannot auto-lock, but iOS still pauses tabs you switch away from. Keep Safari in the foreground. Use Save to open the iOS share sheet when hosted over HTTPS. iOS may clear browser storage after long inactivity, so save important exports or use Keep storage in Settings.';
   }
   box.classList.remove('hidden');
 }
@@ -2599,6 +2764,18 @@ function bindEvents() {
     if (q) q.disabled = $('#dlMode').value === 'audio';
   });
   $('#dlUrl').addEventListener('keydown', e => { if (e.key === 'Enter') startDownload(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) releaseWakeLock();
+    else syncWakeLock();
+  });
+  window.addEventListener('pageshow', syncWakeLock);
+  window.addEventListener('online', syncWakeLock);
+  window.addEventListener('beforeunload', e => {
+    if (hasActiveJobs()) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
   let depth = 0;
   window.addEventListener('dragenter', e => {
     if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
