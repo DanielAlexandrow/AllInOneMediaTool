@@ -368,6 +368,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
               <select id="dlMode">
                 <option value="video">Video (MP4)</option>
                 <option value="audio">Audio (MP3)</option>
+                <option value="m4a">Audio (M4A, original)</option>
               </select>
             </label>
             <label class="field">Quality
@@ -381,13 +382,25 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
               </select>
             </label>
           </div>
+          <label class="field hidden" id="dlAudioField" style="margin-top:12px">MP3 bitrate
+            <select id="dlAudioBitrate">
+              <option value="320" selected>320 kbps</option>
+              <option value="256">256 kbps</option>
+              <option value="192">192 kbps</option>
+              <option value="128">128 kbps</option>
+            </select>
+          </label>
+          <p class="hint hidden" id="dlAudioHint">Source audio is usually 128–160 kbps; this sets the MP3 output. It cannot restore detail.</p>
+          <p class="hint hidden" id="dlM4aHint">Saves the original AAC audio without re-encoding. Fast and engine-free.</p>
+          <label class="check" id="dlMaxAudioWrap"><input type="checkbox" id="dlMaxAudio"> Maximize video audio quality (use best source; may convert Opus)</label>
+          <p class="hint">History shows the selected source audio. By default the app copies AAC when it is at least 112 kbps; otherwise it uses the best source, converting Opus to AAC 256k if needed.</p>
           <div class="row" style="margin-top:14px">
             <button class="btn primary" data-action="download">Download</button>
             <button class="btn ghost" data-action="paste-url">Paste</button>
             <button class="btn ghost" data-action="demo-url">Try sample video</button>
           </div>
-          <label class="check"><input type="checkbox" id="dlTurbo" checked> Turbo download (4 parallel connections)</label>
-          <p class="hint">Turbo fetches several byte ranges at once; measured about 3x faster on the default Invidious proxy. It falls back automatically if the server rejects ranges. On a phone, 240p or 360p is several times smaller than 720p/1080p. The first job also loads the ~32 MB FFmpeg engine once; later jobs reuse it. Keep this page open: a screen wake lock is requested, but iOS still pauses tabs you switch away from.</p>
+          <label class="check"><input type="checkbox" id="dlTurbo" checked> Turbo download (6 parallel connections)</label>
+          <p class="hint">Turbo fetches up to six byte ranges at once and is typically 3-4x faster on the default Invidious proxy; six connections are still subject to the server's bandwidth. It falls back automatically if ranges are rejected. On a phone, 240p or 360p is several times smaller than 720p/1080p. The first job also loads the ~32 MB FFmpeg engine once; later jobs reuse it. Keep this page open: a screen wake lock is requested, but iOS still pauses tabs you switch away from.</p>
           <div id="dlStatus" class="inline-status hidden"></div>
         </div>
         <div class="card">
@@ -478,7 +491,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
           </label>
           <label class="check"><input id="setAuto" type="checkbox"> Auto-save completed exports</label>
           <label class="check"><input id="setKeepAwake" type="checkbox"> Request screen wake lock during downloads and exports</label>
-          <p class="hint">Inputs, exports, and history metadata stay in this browser. Auto-save asks the browser to download each finished export. Wake Lock prevents the screen from sleeping; switching apps can still suspend Safari.</p>
+          <label class="check"><input id="setMaxAudio" type="checkbox"> Maximize audio quality for video downloads</label>
+          <p class="hint">Inputs, exports, and history metadata stay in this browser. Auto-save asks the browser to download each finished export. Wake Lock prevents the screen from sleeping; switching apps can still suspend Safari. Audio is normally copied as AAC when it is at least 112 kbps. This option always uses the best source, converting Opus to AAC 256k (larger and slower).</p>
         </div>
         <div class="card">
           <h3>FFmpeg engine</h3>
@@ -508,7 +522,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:650
           <ol class="steps">
             <li>Host this HTML over HTTPS (for example Netlify Drop, Cloudflare Pages, or GitHub Pages) or serve it from a computer on the same Wi-Fi.</li>
             <li>Open the URL in Safari. Safari 16.4 or newer is recommended for WebAssembly SIMD.</li>
-            <li>Turbo uses four parallel connections and was about 3x faster than a single stream in testing.</li>
+            <li>Turbo uses up to six parallel connections and was 3-4x faster than a single stream in testing. The server's total bandwidth is still the limit.</li>
             <li>Keep Safari in the foreground while downloading or exporting. The app requests a screen wake lock so the screen cannot auto-lock, but iOS still pauses tabs you switch away from.</li>
             <li>Wake Lock works in Safari 16.4+. Before iOS 18.4 it does not work from a Home Screen web app, so use a normal Safari tab there.</li>
             <li>The first download loads the ~32 MB FFmpeg engine once; later jobs reuse it.</li>
@@ -863,7 +877,8 @@ function defaultSettings() {
     preferredQuality: '720',
     autoDownload: false,
     turbo: true,
-    keepAwake: true
+    keepAwake: true,
+    maxAudio: false
   };
 }
 function loadSettings() {
@@ -1862,16 +1877,30 @@ function jobProgress(job, from, to, note) {
   if (note) job.note = note;
   scheduleJobUI(job);
 }
+function audioQualityScore(f) {
+  const bitrate = Number(f.bitrate) || 0;
+  return /opus/i.test(f.type || '') ? bitrate * 1.15 : bitrate;
+}
 function chooseYouTubeStreams(formats, quality, mode) {
   const list = Array.isArray(formats) ? formats.filter(f => f && f.url) : [];
   if (!list.length) throw new Error('No playable streams were returned by the instance.');
   const audioList = list.filter(f => /^audio\//i.test(f.type || ''));
-  const audioMp4 = audioList.filter(f => /audio\/mp4/i.test(f.type || ''));
-  const audioSorted = (audioMp4.length ? audioMp4 : audioList).slice().sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
-  const audio = audioSorted[0];
+  const audio = audioList.slice().sort((a, b) => audioQualityScore(b) - audioQualityScore(a))[0];
+  const audioAac = audioList.filter(f => /audio\/mp4/i.test(f.type || ''))
+    .slice().sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
+  let audioKbps = audio ? Math.round((Number(audio.bitrate) || 0) / 1000) : 0;
+  let audioCodec = audio ? (/opus/i.test(audio.type || '') ? 'Opus' : /audio\/mp4/i.test(audio.type || '') ? 'AAC' : 'audio') : '';
   if (mode === 'audio') {
     if (!audio) throw new Error('This instance returned no audio-only stream.');
-    return { audio: audio };
+    return { audio: audio, audioKbps: audioKbps, audioCodec: audioCodec };
+  }
+  if (mode === 'm4a') {
+    if (!audioAac) throw new Error('This video has no AAC/M4A audio stream. Use MP3 or video instead.');
+    return {
+      audio: audioAac,
+      audioKbps: Math.round((Number(audioAac.bitrate) || 0) / 1000),
+      audioCodec: 'AAC'
+    };
   }
   const limit = quality === 'max' ? Infinity : (Number(quality) || 1080);
   const videos = list.filter(f => /^video\//i.test(f.type || '')).map(f => ({
@@ -1889,7 +1918,13 @@ function chooseYouTubeStreams(formats, quality, mode) {
   pool.sort((a, b) => (b.height - a.height) || (b.bitrate - a.bitrate));
   const pick = pool[0];
   if (!audio) throw new Error('This instance returned no audio stream to mux.');
-  return { video: pick.raw, audio: audio, videoMp4: pick.mp4, videoHeight: pick.height };
+  let chosenAudio = audio;
+  if (!state.settings.maxAudio && audioAac && (Number(audioAac.bitrate) || 0) >= 112000) {
+    chosenAudio = audioAac;
+    audioKbps = Math.round((Number(audioAac.bitrate) || 0) / 1000);
+    audioCodec = 'AAC';
+  }
+  return { video: pick.raw, audio: chosenAudio, audioKbps: audioKbps, audioCodec: audioCodec, videoMp4: pick.mp4, videoHeight: pick.height };
 }
 async function invidiousInfo(videoId, signal) {
   const bases = [String(state.settings.invidiousInstance || '').trim(), DEFAULT_INVIDIOUS]
@@ -2003,9 +2038,9 @@ async function fetchRangeChunk(url, start, end, signal, job, note, from, to, tot
   throw lastErr || new Error('Turbo chunk failed');
 }
 async function downloadParallel(url, job, from, to, note, total, signal, mime) {
-  const connections = state.settings.turbo === false ? 1 : 4;
+  const connections = state.settings.turbo === false ? 1 : 6;
   if (connections < 2 || !total || total < 1024 * 1024) return null;
-  const chunkSize = 2 * 1024 * 1024;
+  const chunkSize = 1536 * 1024;
   const count = Math.ceil(total / chunkSize);
   const chunks = new Array(count);
   const shared = { received: 0 };
@@ -2100,7 +2135,7 @@ async function muxStreams(videoBlob, audioBlob, videoMime, audioMime, job) {
       if (videoIsMp4) {
         args.push('-c:v', 'copy');
         if (audioIsMp4) args.push('-c:a', 'copy');
-        else args.push('-c:a', 'aac', '-b:a', '192k');
+        else args.push('-c:a', 'aac', '-b:a', '256k');
         args.push('-movflags', '+faststart');
       } else {
         args.push('-c:v', 'copy', '-c:a', 'libopus', '-b:a', '128k');
@@ -2121,11 +2156,12 @@ async function muxStreams(videoBlob, audioBlob, videoMime, audioMime, job) {
     }
   });
 }
-async function convertAudioToMp3(audioBlob, audioMime, job, signal) {
+async function convertAudioToMp3(audioBlob, audioMime, job, signal, bitrate) {
+  const kbps = Math.max(128, Math.min(320, Number(bitrate) || 320));
   jobProgress(job, 0.7, 0.72, 'Preparing FFmpeg engine (first run downloads about 32 MB)...');
   return ffmpegExclusive(async () => {
     const ff = await ensureFFmpeg();
-    job.note = 'Encoding MP3...';
+    job.note = 'Encoding MP3 at ' + kbps + ' kbps...';
     scheduleJobUI(job);
     const aac = /audio\/mp4/i.test(audioMime) || /audio\/aac/i.test(audioMime);
     const ext = aac ? 'm4a' : 'webm';
@@ -2133,7 +2169,7 @@ async function convertAudioToMp3(audioBlob, audioMime, job, signal) {
     const outName = 'dl-audio.mp3';
     try {
       await ff.writeFile(inName, new Uint8Array(await audioBlob.arrayBuffer()));
-      const args = ['-i', inName, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-y', outName];
+      const args = ['-i', inName, '-vn', '-c:a', 'libmp3lame', '-b:a', kbps + 'k', '-y', outName];
       pushLog('$ ffmpeg ' + args.join(' '));
       job.note = 'Encoding MP3...';
       scheduleJobUI(job);
@@ -2157,6 +2193,18 @@ async function downloadYouTube(url, mode, quality, job, signal) {
   const streams = chooseYouTubeStreams(data.adaptiveFormats, quality, mode);
   const title = sanitizeFilename(data.title || ('youtube-' + id));
   const meta = { duration: Number(data.lengthSeconds) || 0 };
+  const audioInfo = streams.audioCodec ? streams.audioKbps + 'k ' + streams.audioCodec : '';
+  const mp3Bitrate = Math.max(128, Math.min(320, Number(job.audioBitrate) || 320));
+  const audioAction = mode === 'm4a'
+    ? 'copied to M4A'
+    : mode === 'audio'
+      ? 'encoded to MP3 ' + mp3Bitrate + 'k'
+      : (streams.audioCodec === 'AAC' ? 'copied into MP4' : 'converted to AAC 256k');
+  if (audioInfo) pushLog('Audio source: ' + audioInfo + ' (' + audioAction + ')');
+  if (audioInfo && streams.audioKbps && streams.audioKbps < 96) {
+    pushLog('Warning: the best audio this video offers is only ' + streams.audioKbps + ' kbps.');
+  }
+  const lowAudio = audioInfo && streams.audioKbps && streams.audioKbps < 96 ? ' (low source)' : '';
   const thumbs = Array.isArray(data.videoThumbnails) ? data.videoThumbnails : [];
   const thumbPick = ['mqdefault', 'medium', 'high', 'maxresdefault', 'maxres']
     .map(q => thumbs.find(t => t.quality === q)).find(Boolean) || thumbs[0];
@@ -2164,16 +2212,21 @@ async function downloadYouTube(url, mode, quality, job, signal) {
   if (thumbPick && thumbPick.url) {
     try { thumbUrl = new URL(thumbPick.url, info.base).toString(); } catch (e) { thumbUrl = thumbPick.url; }
   }
+  if (mode === 'm4a') {
+    job.detail = 'YouTube · M4A ' + streams.audioKbps + 'k · original audio' + lowAudio;
+    const audioBlob = await downloadStream(streams.audio.url, info.base, job, 0.05, 0.9, 'Downloading original audio', streams.audio, signal);
+    return { blob: new Blob([audioBlob], { type: 'audio/mp4' }), filename: title + '.m4a', detail: job.detail, meta: meta, thumbUrl: thumbUrl };
+  }
   if (mode === 'audio') {
-    job.detail = 'YouTube · MP3';
+    job.detail = 'YouTube · MP3 ' + mp3Bitrate + 'k · source ' + audioInfo + lowAudio;
     const audioBlob = await downloadStream(streams.audio.url, info.base, job, 0.05, 0.66, 'Downloading audio', streams.audio, signal);
-    const mp3 = await convertAudioToMp3(audioBlob, streams.audio.type || '', job, signal);
-    return { blob: mp3, filename: title + '.mp3', detail: 'YouTube · MP3', meta: meta, thumbUrl: thumbUrl };
+    const mp3 = await convertAudioToMp3(audioBlob, streams.audio.type || '', job, signal, mp3Bitrate);
+    return { blob: mp3, filename: title + '.mp3', detail: job.detail, meta: meta, thumbUrl: thumbUrl };
   }
   const sizeMatch = String((streams.video && streams.video.size) || '').match(/^(\d+)x(\d+)$/);
   if (sizeMatch) { meta.width = Number(sizeMatch[1]); meta.height = Number(sizeMatch[2]); }
   else if (streams.videoHeight) meta.height = streams.videoHeight;
-  job.detail = 'YouTube · ' + (streams.videoHeight ? streams.videoHeight + 'p' : 'video');
+  job.detail = 'YouTube · ' + (streams.videoHeight ? streams.videoHeight + 'p' : 'video') + (audioInfo ? ' · audio ' + audioInfo + (streams.audioCodec === 'AAC' ? '' : ' → AAC 256k') : '') + lowAudio;
   const videoBlob = await downloadStream(streams.video.url, info.base, job, 0.03, 0.48, 'Downloading video', streams.video, signal);
   const audioBlob = await downloadStream(streams.audio.url, info.base, job, 0.48, 0.7, 'Downloading audio', streams.audio, signal);
   const muxed = await muxStreams(videoBlob, audioBlob, streams.video.type || 'video/mp4', streams.audio.type || 'audio/mp4', job);
@@ -2188,7 +2241,7 @@ async function viaBridge(url, mode, quality, job, signal) {
     endpoint = new URL(base, location.href);
   } catch (e) { throw new Error('The bridge URL is not valid.'); }
   endpoint.searchParams.set('url', url);
-  endpoint.searchParams.set('mode', mode);
+  endpoint.searchParams.set('mode', mode === 'm4a' ? 'audio' : mode);
   endpoint.searchParams.set('quality', quality === 'max' ? '2160' : quality);
   job.note = 'Asking the local bridge...';
   scheduleJobUI(job);
@@ -2226,7 +2279,7 @@ async function viaCobalt(url, mode, quality, job, signal) {
   const body = {
     url: url,
     videoQuality: quality === 'max' ? 'max' : String(quality),
-    downloadMode: mode === 'audio' ? 'audio' : 'auto',
+    downloadMode: mode === 'video' ? 'auto' : 'audio',
     filenameStyle: 'basic',
     youtubeVideoCodec: 'h264'
   };
@@ -2279,10 +2332,10 @@ function filenameFromUrl(url, mode, mime) {
   try {
     const u = new URL(url);
     let base = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
-    base = base || (mode === 'audio' ? 'audio' : 'media');
-    if (!extOf(base)) base = ensureExtension(base, mime || (mode === 'audio' ? 'audio/mpeg' : 'video/mp4'));
+    base = base || (mode === 'audio' ? 'audio' : mode === 'm4a' ? 'audio' : 'media');
+    if (!extOf(base)) base = ensureExtension(base, mime || (mode === 'audio' ? 'audio/mpeg' : mode === 'm4a' ? 'audio/mp4' : 'video/mp4'));
     return sanitizeFilename(base);
-  } catch (e) { return mode === 'audio' ? 'audio.mp3' : 'media.mp4'; }
+  } catch (e) { return mode === 'audio' ? 'audio.mp3' : mode === 'm4a' ? 'audio.m4a' : 'media.mp4'; }
 }
 async function resolveDownload(url, mode, quality, job, signal) {
   const method = state.settings.downloaderMethod || 'auto';
@@ -2333,6 +2386,7 @@ async function startDownload() {
   try { new URL(url); } catch (e) { toast('That URL is not valid', 'error'); return; }
   const mode = $('#dlMode').value;
   const quality = $('#dlQuality').value;
+  const audioBitrate = Number($('#dlAudioBitrate') ? $('#dlAudioBitrate').value : 320) || 320;
   state.dlBusy = true;
   const btn = document.querySelector('[data-action="download"]');
   if (btn) btn.disabled = true;
@@ -2343,7 +2397,8 @@ async function startDownload() {
   }
   const job = {
     id: uid(), type: 'download', status: 'processing', name: prettyUrl(url), url: url,
-    mode: mode, quality: quality, detail: (parseYouTubeId(url) ? 'YouTube' : 'URL') + ' · ' + (mode === 'audio' ? 'MP3' : quality === 'max' ? 'best' : quality + 'p'),
+    mode: mode, quality: quality, audioBitrate: audioBitrate,
+    detail: (parseYouTubeId(url) ? 'YouTube' : 'URL') + ' · ' + (mode === 'audio' ? 'MP3 ' + audioBitrate + 'k' : mode === 'm4a' ? 'M4A original' : quality === 'max' ? 'best' : quality + 'p'),
     progress: 0, createdAt: Date.now(), settings: {}
   };
   state.jobs.unshift(job);
@@ -2518,6 +2573,10 @@ function fillSettingsForm() {
   if (auto) auto.checked = !!s.autoDownload;
   const keep = $('#setKeepAwake');
   if (keep) keep.checked = s.keepAwake !== false;
+  const maxAudio = $('#setMaxAudio');
+  if (maxAudio) maxAudio.checked = s.maxAudio === true;
+  const dlMax = $('#dlMaxAudio');
+  if (dlMax) dlMax.checked = s.maxAudio === true;
   const turbo = $('#dlTurbo');
   if (turbo) turbo.checked = s.turbo !== false;
 }
@@ -2536,6 +2595,20 @@ function bindSettingsForm() {
   if (auto) auto.addEventListener('change', () => { state.settings.autoDownload = auto.checked; saveSettings(); });
   const keep = $('#setKeepAwake');
   if (keep) keep.addEventListener('change', () => { state.settings.keepAwake = keep.checked; saveSettings(); syncWakeLock(); });
+  const maxAudio = $('#setMaxAudio');
+  if (maxAudio) maxAudio.addEventListener('change', () => {
+    state.settings.maxAudio = maxAudio.checked;
+    saveSettings();
+    const dlMax = $('#dlMaxAudio');
+    if (dlMax) dlMax.checked = maxAudio.checked;
+  });
+  const dlMax = $('#dlMaxAudio');
+  if (dlMax) dlMax.addEventListener('change', () => {
+    state.settings.maxAudio = dlMax.checked;
+    saveSettings();
+    const setMax = $('#setMaxAudio');
+    if (setMax) setMax.checked = dlMax.checked;
+  });
   const turbo = $('#dlTurbo');
   if (turbo) turbo.addEventListener('change', () => { state.settings.turbo = turbo.checked; saveSettings(); });
   const quality = $('#setQuality');
@@ -2760,8 +2833,19 @@ function bindEvents() {
   $('#libFilter').addEventListener('change', renderLibrary);
   $('#libSort').addEventListener('change', renderLibrary);
   $('#dlMode').addEventListener('change', () => {
+    const mode = $('#dlMode').value;
+    const audioMode = mode === 'audio';
+    const m4aMode = mode === 'm4a';
     const q = $('#dlQuality');
-    if (q) q.disabled = $('#dlMode').value === 'audio';
+    if (q) q.disabled = audioMode || m4aMode;
+    const field = $('#dlAudioField');
+    if (field) field.classList.toggle('hidden', !audioMode);
+    const hint = $('#dlAudioHint');
+    if (hint) hint.classList.toggle('hidden', !audioMode);
+    const m4aHint = $('#dlM4aHint');
+    if (m4aHint) m4aHint.classList.toggle('hidden', !m4aMode);
+    const maxWrap = $('#dlMaxAudioWrap');
+    if (maxWrap) maxWrap.classList.toggle('hidden', mode !== 'video');
   });
   $('#dlUrl').addEventListener('keydown', e => { if (e.key === 'Enter') startDownload(); });
   document.addEventListener('visibilitychange', () => {
